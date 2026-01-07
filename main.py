@@ -1,6 +1,7 @@
 import flet as ft
 import json
 import os
+import sys
 
 def main(page: ft.Page):
     page.title = "Patching pour les Noobs"
@@ -8,18 +9,74 @@ def main(page: ft.Page):
     page.window_width = 900
     page.window_height = 700
 
-    # Fichier de sauvegarde
-    SAVE_FILE = "roadmap_data.json"
+    # Déterminer le répertoire de base (compatible avec .exe et mode dev)
+    if getattr(sys, 'frozen', False):
+        # Si l'application est compilée en .exe (PyInstaller)
+        base_dir = os.path.dirname(sys.executable)
+    else:
+        # Si l'application est exécutée en mode développement
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    # Fichiers de sauvegarde avec chemins absolus
+    SAVE_FILE = os.path.join(base_dir, "roadmap_data.json")
+    INSTRUCTIONS_FILE = os.path.join(base_dir, "instructions_data.json")
 
-    # Fonction pour sauvegarder les tâches
+    # Fonction pour sauvegarder les tâches (sans les instructions)
     def save_tasks():
         try:
+            # Créer une copie des tâches sans les instructions
+            tasks_without_instructions = {}
+            for env in tasks:
+                tasks_without_instructions[env] = []
+                for col in tasks[env]:
+                    col_without_instructions = []
+                    for task in col:
+                        task_copy = {k: v for k, v in task.items() if k != "instructions"}
+                        col_without_instructions.append(task_copy)
+                    tasks_without_instructions[env].append(col_without_instructions)
+            
             with open(SAVE_FILE, 'w', encoding='utf-8') as f:
-                json.dump(tasks, f, ensure_ascii=False, indent=2)
+                json.dump(tasks_without_instructions, f, ensure_ascii=False, indent=2)
             print(f">>> Données sauvegardées dans {SAVE_FILE}")
         except Exception as e:
             print(f">>> Erreur lors de la sauvegarde: {e}")
+    
+    # Fonction pour sauvegarder les instructions
+    def save_instructions():
+        try:
+            instructions_data = {}
+            for env in tasks:
+                instructions_data[env] = []
+                for col_index, col in enumerate(tasks[env]):
+                    col_instructions = []
+                    for task_index, task in enumerate(col):
+                        # Créer une clé unique pour chaque tâche
+                        task_key = f"{env}_{col_index}_{task_index}_{task.get('text', '')}"
+                        col_instructions.append({
+                            "task_name": task.get('text', ''),
+                            "instructions": task.get('instructions', '')
+                        })
+                    instructions_data[env].append(col_instructions)
+            
+            with open(INSTRUCTIONS_FILE, 'w', encoding='utf-8') as f:
+                json.dump(instructions_data, f, ensure_ascii=False, indent=2)
+            print(f">>> Instructions sauvegardées dans {INSTRUCTIONS_FILE}")
+        except Exception as e:
+            print(f">>> Erreur lors de la sauvegarde des instructions: {e}")
 
+    # Fonction pour charger les instructions
+    def load_instructions():
+        if os.path.exists(INSTRUCTIONS_FILE):
+            try:
+                with open(INSTRUCTIONS_FILE, 'r', encoding='utf-8') as f:
+                    loaded = json.load(f)
+                    print(f">>> Instructions chargées depuis {INSTRUCTIONS_FILE}")
+                    return loaded
+            except Exception as e:
+                print(f">>> Erreur lors du chargement des instructions: {e}")
+                return {"test": [], "pilote": [], "prod": []}
+        return {"test": [], "pilote": [], "prod": []}
+    
     # Fonction pour charger les tâches
     def load_tasks():
         if os.path.exists(SAVE_FILE):
@@ -34,8 +91,8 @@ def main(page: ft.Page):
         return {"test": [], "pilote": [], "prod": []}
     
     # Fonction pour migrer l'ancien format (liste plate) vers le nouveau (liste de colonnes)
-    def migrate_to_columns(tasks_dict):
-        """Convertit les tâches plates en colonnes si nécessaire"""
+    def migrate_to_columns(tasks_dict, instructions_dict):
+        """Convertit les tâches plates en colonnes si nécessaire et fusionne les instructions"""
         for env in ["test", "pilote", "prod"]:
             if env in tasks_dict and len(tasks_dict[env]) > 0:
                 # Vérifier si c'est déjà au nouveau format (liste de listes)
@@ -44,10 +101,34 @@ def main(page: ft.Page):
                     # Migration : convertir chaque tâche en une colonne avec une seule tâche
                     print(f">>> Migration de {env} vers le format colonnes")
                     tasks_dict[env] = [[task] for task in tasks_dict[env]]
+                
+                # Fusionner les instructions depuis le fichier séparé
+                if env in instructions_dict and len(instructions_dict[env]) > 0:
+                    for col_index, col in enumerate(tasks_dict[env]):
+                        if col_index < len(instructions_dict[env]):
+                            for task_index, task in enumerate(col):
+                                if task_index < len(instructions_dict[env][col_index]):
+                                    instruction_data = instructions_dict[env][col_index][task_index]
+                                    # Vérifier que le nom de la tâche correspond
+                                    if instruction_data.get('task_name') == task.get('text'):
+                                        task['instructions'] = instruction_data.get('instructions', '')
+                                    else:
+                                        task['instructions'] = ''
+                                else:
+                                    task['instructions'] = ''
+                        else:
+                            for task in col:
+                                task['instructions'] = ''
+                else:
+                    # Ajouter le champ "instructions" vide si pas de fichier d'instructions
+                    for col in tasks_dict[env]:
+                        for task in col:
+                            if "instructions" not in task:
+                                task["instructions"] = ""
         return tasks_dict
 
-    # Stockage des tâches par environnement (chargement depuis le fichier)
-    tasks = migrate_to_columns(load_tasks())
+    # Stockage des tâches par environnement (chargement depuis les fichiers)
+    tasks = migrate_to_columns(load_tasks(), load_instructions())
     
     # État de verrouillage global (pour persister entre les recharges)
     lock_states = {"test": True, "pilote": True, "prod": True}
@@ -218,16 +299,22 @@ def main(page: ft.Page):
             )
             
             def toggle_edit(e):
+                # Si on passe de mode édition à mode lecture (on sauvegarde)
+                if not instructions_field.read_only:
+                    tasks[env_name][col_index][task_index_in_col]["instructions"] = instructions_field.value
+                    save_instructions()
+                    print(f">>> Instructions sauvegardées pour '{task_data['text']}'")
+                
                 instructions_field.read_only = not instructions_field.read_only
                 edit_btn.icon = ft.Icons.SAVE if not instructions_field.read_only else ft.Icons.EDIT
                 edit_btn.tooltip = "Sauvegarder" if not instructions_field.read_only else "Éditer"
                 page.update()
             
             def close_overlay(e):
-                # Sauvegarder si en mode édition
+                # Sauvegarder si en mode édition avant de fermer
                 if not instructions_field.read_only:
                     tasks[env_name][col_index][task_index_in_col]["instructions"] = instructions_field.value
-                    save_tasks()
+                    save_instructions()
                     print(f">>> Instructions sauvegardées")
                 overlay_container.visible = False
                 page.update()
@@ -264,8 +351,8 @@ def main(page: ft.Page):
                             ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN)
                         ], tight=True),
                         padding=20,
-                        width=600,
-                        height=400
+                        width=800,
+                        height=600
                     ),
                     elevation=10
                 ),
@@ -484,7 +571,8 @@ def main(page: ft.Page):
                     "text": task_name_input.value.strip(),
                     "description": task_desc_input.value.strip() if task_desc_input.value else "",
                     "priority": priority_dropdown.value,
-                    "done": False
+                    "done": False,
+                    "instructions": ""  # Initialiser le champ instructions
                 }
                 
                 # Interpréter add_form_container.data
